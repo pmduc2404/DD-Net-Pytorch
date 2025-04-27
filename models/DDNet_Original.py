@@ -34,6 +34,27 @@ class c1D(nn.Module):
         output = F.leaky_relu(output, 0.2, True)
         return output
 
+# class c1D(nn.Module):
+#     def __init__(self, input_channels, input_dims, filters, kernel):
+#         super(c1D, self).__init__()
+#         self.cut_last_element = (kernel % 2 == 0)
+#         self.padding = math.ceil((kernel - 1) / 2)
+#         self.depthwise = nn.Conv1d(input_dims, input_dims, kernel_size=kernel, 
+#                                    groups=input_dims, padding=self.padding, bias=False)
+#         self.pointwise = nn.Conv1d(input_dims, filters, kernel_size=1, bias=False)
+#         self.bn = nn.BatchNorm1d(num_features=input_channels)
+
+#     def forward(self, x):
+#         x = x.permute(0, 2, 1)  # (B, D, C)
+#         x = self.depthwise(x)
+#         x = self.pointwise(x)
+#         if self.cut_last_element:
+#             x = x[:, :, :-1]
+#         x = x.permute(0, 2, 1)  # (B, C, filters)
+#         x = self.bn(x)
+#         return F.leaky_relu(x, 0.2, True)
+
+
 
 class block(nn.Module):
     def __init__(self, input_channels, input_dims, filters, kernel):
@@ -63,7 +84,7 @@ class d1D(nn.Module):
 class spatialDropout1D(nn.Module):
     def __init__(self, p):
         super(spatialDropout1D, self).__init__()
-        self.dropout = nn.Dropout2d(p)
+        self.dropout = nn.Dropout1d(p)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -148,18 +169,24 @@ class DDNet_Original(nn.Module):
         x = x.permute(0, 2, 1)
 
         diff_slow, diff_fast = poses_motion(P)
+        print("M", M.shape)
+        print("P", P.shape)
+
         x_d_slow = self.slow_conv1(diff_slow)
         x_d_slow = self.slow_conv2(x_d_slow)
         x_d_slow = self.slow_conv3(x_d_slow)
         x_d_slow = x_d_slow.permute(0, 2, 1)
         x_d_slow = self.slow_pool(x_d_slow)
         x_d_slow = x_d_slow.permute(0, 2, 1)
+        print("x_d_slow shape:", x_d_slow.shape)
 
         x_d_fast = self.fast_conv1(diff_fast)
         x_d_fast = self.fast_conv2(x_d_fast)
         x_d_fast = self.fast_conv3(x_d_fast)
         # x,x_d_fast,x_d_slow shape: (B,framel//2,filters)
 
+        print("x_d_fast shape:", x_d_fast.shape)
+        print("x shape", x.shape)
         x = torch.cat((x, x_d_slow, x_d_fast), dim=2)
         x = self.block1(x)
         x = x.permute(0, 2, 1)

@@ -13,24 +13,58 @@ from sklearn.metrics import confusion_matrix
 
 from dataloader.jhmdb_loader import load_jhmdb_data, Jdata_generator, JConfig
 from dataloader.shrec_loader import load_shrec_data, Sdata_generator, SConfig
-from models.DDNet_Original import DDNet_Original as DDNet
+# from models.DDNet_Original import DDNet_Original as DDNet
+from models.DDNet_Original_ODE import DDNet_Original as DDNet
+# from models.DDNet_Enhanced_ODE import EnhancedDDNet_ODE as DDNet
+
+from models.OTLoss import *
+
 from utils import makedir
 import sys
 import time
 import numpy as np
 import logging
-sys.path.insert(0, './pytorch-summary/torchsummary/')
-from torchsummary import summary  # noqa
 
-savedir = Path('experiments') / Path(str(int(time.time())))
-makedir(savedir)
-logging.basicConfig(filename=savedir/'train.log', level=logging.INFO)
+sys.path.insert(0, './pytorch-summary/torchsummary/')
+# from torchsummary import summary  # noqa
+
+# Add seed setting for reproducibility
+def set_seed(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        # Set deterministic behavior for CUDA
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    np.random.seed(seed)
+
+# savedir = Path('experiments') / Path(str(int(time.time())))
+
+def get_incremental_dir(root_dir, prefix="exp"):
+    root_dir = Path(root_dir)
+    root_dir.mkdir(parents=True, exist_ok=True)
+    i = 0
+    while True:
+        exp_dir = root_dir / (prefix if i == 0 else f"{prefix}{i}")
+        if not exp_dir.exists():
+            exp_dir.mkdir(parents=True)
+            return exp_dir
+        i += 1
+
+
 history = {
     "train_loss": [],
     "test_loss": [],
     "test_acc": []
 }
 
+# Set default dtype and device (modern approach)
+torch.set_default_dtype(torch.float32)
+if torch.cuda.is_available():
+    torch.set_default_device('cuda')
+else:
+    torch.set_default_device('cpu')
 
 def train(args, model, device, train_loader, optimizer, epoch, criterion):
     model.train()
@@ -90,9 +124,9 @@ def main():
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=199, metavar='N',
+    parser.add_argument('--epochs', type=int, default=600, metavar='N',
                         help='number of epochs to train (default: 199)')
-    parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+    parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                         help='learning rate (default: 0.01)')
     parser.add_argument('--gamma', type=float, default=0.5, metavar='M',
                         help='Learning rate step gamma (default: 0.5)')
@@ -104,6 +138,8 @@ def main():
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False,
                         help='For Saving the current Model')
+    parser.add_argument('--seed', type=int, default=42, metavar='S',
+                        help='random seed (default: 42)')
     parser.add_argument('--dataset', type=int, required=True, metavar='N',
                         help='0 for JHMDB, 1 for SHREC coarse, 2 for SHREC fine, others is undefined')
     parser.add_argument('--model', action='store_true', default=False,
@@ -112,15 +148,33 @@ def main():
                         help='calc calc time per sample')
     args = parser.parse_args()
     logging.info(args)
+    
+    # Set random seed before creating data loaders
+    set_seed(args.seed)
+    
     use_cuda = not args.no_cuda and torch.cuda.is_available()
-
     device = torch.device("cuda" if use_cuda else "cpu")
-
-    kwargs = {'batch_size': args.batch_size}
+    
+    # Create a generator for DataLoader
+    generator = torch.Generator(device=device)
+    generator.manual_seed(args.seed)
+    
+    kwargs = {
+        'batch_size': args.batch_size,
+        'generator': generator
+    }
+    
     if use_cuda:
-        kwargs.update({'num_workers': 1,
-                       'pin_memory': True,
-                       'shuffle': True},)
+        kwargs.update({
+            'num_workers': 1,
+            'pin_memory': True,
+            'shuffle': True
+        })
+    
+    savedir = get_incremental_dir("experiments", prefix="exp")
+
+    makedir(savedir)
+    logging.basicConfig(filename=savedir/'train.log', level=logging.INFO)
 
     # alias
     Config = None
@@ -149,14 +203,14 @@ def main():
     C = Config
     Train, Test, le = load_data()
     X_0, X_1, Y = data_generator(Train, C, le)
-    X_0 = torch.from_numpy(X_0).type('torch.FloatTensor')
-    X_1 = torch.from_numpy(X_1).type('torch.FloatTensor')
-    Y = torch.from_numpy(Y).type('torch.LongTensor')
+    X_0 = torch.from_numpy(X_0).to(torch.float32)
+    X_1 = torch.from_numpy(X_1).to(torch.float32)
+    Y = torch.from_numpy(Y).to(torch.long)
 
     X_0_t, X_1_t, Y_t = data_generator(Test, C, le)
-    X_0_t = torch.from_numpy(X_0_t).type('torch.FloatTensor')
-    X_1_t = torch.from_numpy(X_1_t).type('torch.FloatTensor')
-    Y_t = torch.from_numpy(Y_t).type('torch.LongTensor')
+    X_0_t = torch.from_numpy(X_0_t).to(torch.float32)
+    X_1_t = torch.from_numpy(X_1_t).to(torch.float32)
+    Y_t = torch.from_numpy(Y_t).to(torch.long)
 
     trainset = torch.utils.data.TensorDataset(X_0, X_1, Y)
     train_loader = torch.utils.data.DataLoader(trainset, **kwargs)
@@ -168,18 +222,42 @@ def main():
     Net = DDNet(C.frame_l, C.joint_n, C.joint_d,
                 C.feat_d, C.filters, clc_num)
     model = Net.to(device)
+    from torchinfo import summary
+    x1 = torch.randn(1, C.frame_l, C.feat_d).to(device)  # batch size 1
+    x2 = torch.randn(1, C.frame_l, C.joint_n, C.joint_d).to(device)
+    # summary(model, input_data=(x1, x2))
 
-    summary(model, [(C.frame_l, C.feat_d), (C.frame_l, C.joint_n, C.joint_d)])
+    # summary(model, [(C.frame_l, C.feat_d), (C.frame_l, C.joint_n, C.joint_d)])
+    
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     scheduler = ReduceLROnPlateau(
-        optimizer, factor=args.gamma, patience=5, cooldown=0.5, min_lr=5e-6, verbose=True)
+        optimizer, factor=args.gamma, patience=5, cooldown=0.5, min_lr=5e-6)
+    
+    best_acc = 0.0  # Track best accuracy
+    best_model_path = savedir / "model_best.pt"
+    last_model_path = savedir / "model_last.pt"
+
     for epoch in range(1, args.epochs + 1):
         train_loss = train(args, model, device, train_loader,
                            optimizer, epoch, criterion)
         test(model, device, test_loader)
         scheduler.step(train_loss)
+        
+        # Save best model if current accuracy is better
+        current_acc = history['test_acc'][-1]
+        if current_acc > best_acc:
+            best_acc = current_acc
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'accuracy': best_acc,
+            }, str(best_model_path))
+            msg = f'Saved new best model with accuracy: {best_acc:.4f}'
+            print(msg)
+            logging.info(msg)
 
     fig, (ax1, ax2, ax3) = plt.subplots(nrows=3, ncols=1)
     ax1.plot(history['train_loss'])
@@ -209,7 +287,13 @@ def main():
     fig.tight_layout()
     fig.savefig(str(savedir / "perf.png"))
     if args.save_model:
-        torch.save(model.state_dict(), str(savedir/"model.pt"))
+        # Save last model
+        torch.save({
+            'epoch': args.epochs,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'accuracy': current_acc,
+        }, str(last_model_path))
     if args.calc_time:
         device = ['cpu', 'cuda']
         # calc time
