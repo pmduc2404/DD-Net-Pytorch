@@ -2,5 +2,5 @@
 
 ```Python
 git clone https://github.com/pmduc2404/DDODE-Net-.git
-python train.py --batch-size 512 --epochs 600 --lr 0.001 | tee train.log
+python train.py --batch-size 512 --epochs 600 --lr 0.001 
 ```
